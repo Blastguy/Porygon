@@ -18,10 +18,16 @@ MAX_TOKENS = 16000
 MAX_ITERATIONS = 10  # tool rounds per user turn, so a stuck model can't loop forever
 
 SYSTEM_PROMPT = (
-    "You are porygon, a concise ReAct-style assistant. You have three tools:\n"
+    "You are porygon, a concise ReAct-style assistant. You have five tools:\n"
     "  - calculator: for exact arithmetic.\n"
     "  - wikipedia_search: for factual/encyclopedic lookups.\n"
     "  - file_io: to read, write, and list files in your sandboxed working directory.\n"
+    "  - scratchpad: private working notes for the current task; append intermediate "
+    "results as you gather them and read them back before answering.\n"
+    "  - memory: long-term memory files that persist across sessions. When a task "
+    "might depend on saved context, 'list' the memory files first, then 'read' only "
+    "the relevant ones. Save durable facts the user asks you to remember with "
+    "'write' (read the file first when updating it).\n"
     "Reason about what the user needs, call a tool when it helps, and use the tool "
     "results to answer. Prefer tools over guessing for calculations and facts. When "
     "you have enough information, give a direct final answer."
@@ -31,9 +37,11 @@ SYSTEM_PROMPT = (
 class Agent:
     """Holds the API client and conversation state, and runs the agentic loop."""
 
-    def __init__(self, client: anthropic.Anthropic, workdir: Path) -> None:
+    def __init__(
+        self, client: anthropic.Anthropic, workdir: Path, memory_dir: Path
+    ) -> None:
         self.client = client
-        self.workdir = workdir
+        self.ctx = tools.ToolContext(workdir, memory_dir)
         self.messages: list[dict] = []
 
     def run_turn(self, user_input: str) -> str:
@@ -70,7 +78,7 @@ class Agent:
             if block.type != "tool_use":
                 continue
             print(f"  [tool] {block.name}({_fmt_input(block.input)})")
-            result, is_error = tools.dispatch(block.name, block.input, self.workdir)
+            result, is_error = tools.dispatch(block.name, block.input, self.ctx)
             results.append(
                 {
                     "type": "tool_result",

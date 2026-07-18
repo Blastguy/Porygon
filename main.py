@@ -31,6 +31,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         help="Sandbox directory for the file_io tool (default: ./workspace).",
     )
+    parser.add_argument(
+        "--memory-dir",
+        default="./memory",
+        type=Path,
+        help="Directory for long-term memory files (default: ./memory).",
+    )
     return parser.parse_args(argv)
 
 
@@ -72,9 +78,11 @@ def main(argv: list[str] | None = None) -> int:
 
     workdir = args.workdir
     workdir.mkdir(parents=True, exist_ok=True)
+    memory_dir = args.memory_dir
+    memory_dir.mkdir(parents=True, exist_ok=True)
 
     client = anthropic.Anthropic(api_key=args.api_key)
-    agent = Agent(client, workdir)
+    agent = Agent(client, workdir, memory_dir)
 
     repl(agent)
     return 0

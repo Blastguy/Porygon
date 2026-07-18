@@ -3,10 +3,12 @@
 Exposes ``TOOL_SCHEMAS`` (the JSON schemas handed to the Anthropic API) and
 ``dispatch`` (runs a tool by name and returns ``(result_text, is_error)``).
 
-Three tools are provided:
+Five tools are provided:
   - ``calculator``        evaluate an arithmetic expression (safe AST walk, no eval)
   - ``wikipedia_search``  fetch the intro summary of the best-matching Wikipedia page
   - ``file_io``           read / write / list files inside a sandboxed working dir
+  - ``scratchpad``        in-memory working notes that persist across ReAct steps
+  - ``memory``            long-term memory files (list / read / write) in a memory dir
 """
 
 from __future__ import annotations
@@ -16,6 +18,16 @@ import operator
 from pathlib import Path
 
 import requests
+
+
+class ToolContext:
+    """Everything a tool handler may need: sandbox dir, memory dir, scratchpad."""
+
+    def __init__(self, workdir: Path, memory_dir: Path) -> None:
+        self.workdir = workdir
+        self.memory_dir = memory_dir
+        self.scratchpad = ""
+
 
 # ---------------------------------------------------------------------------
 # Tool schemas (passed verbatim to client.messages.create(tools=...))
@@ -84,6 +96,83 @@ TOOL_SCHEMAS = [
                 },
             },
             "required": ["operation", "path"],
+        },
+    },
+    {
+        "name": "scratchpad",
+        "description": (
+            "Your private working memory for this session. Use it to jot down "
+            "intermediate results, partial findings, or a running plan while you "
+            "work through a multi-step task, then read it back before answering. "
+            "'write' replaces the whole pad, 'append' adds a new line, 'read' "
+            "returns the current contents."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "enum": ["read", "write", "append"],
+                    "description": "The scratchpad operation to perform.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": (
+                        "Text to store (required for 'write' and 'append', "
+                        "ignored for 'read')."
+                    ),
+                },
+            },
+            "required": ["operation"],
+        },
+    },
+    {
+        "name": "memory",
+        "description": (
+            "Long-term memory stored as markdown files that persist across "
+            "sessions. Start with 'list' to see the available file names and "
+            "their one-line summaries, then 'read' only the files that look "
+            "relevant (pass one or more names). Use 'write' to save a new "
+            "memory or update an existing one; it overwrites the whole file, so "
+            "read a file first if you mean to update it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "enum": ["list", "read", "write"],
+                    "description": "The memory operation to perform.",
+                },
+                "names": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Memory file names to read (required for 'read')."
+                    ),
+                },
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Memory file name to write (required for 'write'). "
+                        "A '.md' suffix is added automatically."
+                    ),
+                },
+                "summary": {
+                    "type": "string",
+                    "description": (
+                        "One-line summary of the file, shown by 'list' "
+                        "(required for 'write')."
+                    ),
+                },
+                "content": {
+                    "type": "string",
+                    "description": (
+                        "Markdown body of the memory file (required for 'write')."
+                    ),
+                },
+            },
+            "required": ["operation"],
         },
     },
 ]
@@ -234,11 +323,90 @@ def file_io(operation: str, path: str, content: str | None, workdir: Path) -> st
 
 
 # ---------------------------------------------------------------------------
+# scratchpad
+# ---------------------------------------------------------------------------
+
+
+def scratchpad(operation: str, content: str | None, ctx: ToolContext) -> str:
+    """Read, replace, or append to the in-memory scratchpad on ``ctx``."""
+    if operation == "read":
+        return ctx.scratchpad or "(the scratchpad is empty)"
+
+    if operation in ("write", "append"):
+        if content is None:
+            raise ValueError(f"'content' is required for a {operation} operation")
+        if operation == "write" or not ctx.scratchpad:
+            ctx.scratchpad = content
+        else:
+            ctx.scratchpad += "\n" + content
+        return f"Scratchpad now holds {len(ctx.scratchpad)} characters."
+
+    raise ValueError(f"unknown operation: {operation!r}")
+
+
+# ---------------------------------------------------------------------------
+# memory
+# ---------------------------------------------------------------------------
+
+
+def _memory_path(name: str, memory_dir: Path) -> Path:
+    """Resolve a memory file name inside ``memory_dir``; raise if it escapes."""
+    if not name.endswith(".md"):
+        name += ".md"
+    return _resolve_in_sandbox(name, memory_dir)
+
+
+def _memory_summary(path: Path) -> str:
+    """Return the one-line summary of a memory file (its first line)."""
+    first_line = path.read_text().split("\n", 1)[0].strip()
+    return first_line.removeprefix("Summary:").strip() or "(no summary)"
+
+
+def memory(
+    operation: str,
+    names: list[str] | None,
+    name: str | None,
+    summary: str | None,
+    content: str | None,
+    memory_dir: Path,
+) -> str:
+    """List, read, or write long-term memory files in ``memory_dir``."""
+    if operation == "list":
+        files = sorted(memory_dir.glob("*.md"))
+        if not files:
+            return "No memory files yet."
+        return "\n".join(f"{p.stem} — {_memory_summary(p)}" for p in files)
+
+    if operation == "read":
+        if not names:
+            raise ValueError("'names' is required for a read operation")
+        sections = []
+        for entry in names:
+            path = _memory_path(entry, memory_dir)
+            if not path.is_file():
+                raise ValueError(f"no such memory file: {entry!r}")
+            sections.append(f"## {path.stem}\n\n{path.read_text()}")
+        return "\n\n".join(sections)
+
+    if operation == "write":
+        if name is None or summary is None or content is None:
+            raise ValueError(
+                "'name', 'summary', and 'content' are all required for a write operation"
+            )
+        path = _memory_path(name, memory_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"Summary: {summary}\n\n{content}\n")
+        return f"Saved memory file {path.stem!r}."
+
+    raise ValueError(f"unknown operation: {operation!r}")
+
+
+# ---------------------------------------------------------------------------
 # dispatch
 # ---------------------------------------------------------------------------
 
 
-def dispatch(name: str, tool_input: dict, workdir: Path) -> tuple[str, bool]:
+def dispatch(name: str, tool_input: dict, ctx: ToolContext) -> tuple[str, bool]:
     """Run tool ``name`` with ``tool_input``.
 
     Returns ``(result_text, is_error)``. Any handler exception is caught and
@@ -255,7 +423,24 @@ def dispatch(name: str, tool_input: dict, workdir: Path) -> tuple[str, bool]:
                     tool_input["operation"],
                     tool_input["path"],
                     tool_input.get("content"),
-                    workdir,
+                    ctx.workdir,
+                ),
+                False,
+            )
+        if name == "scratchpad":
+            return (
+                scratchpad(tool_input["operation"], tool_input.get("content"), ctx),
+                False,
+            )
+        if name == "memory":
+            return (
+                memory(
+                    tool_input["operation"],
+                    tool_input.get("names"),
+                    tool_input.get("name"),
+                    tool_input.get("summary"),
+                    tool_input.get("content"),
+                    ctx.memory_dir,
                 ),
                 False,
             )
