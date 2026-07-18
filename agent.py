@@ -40,9 +40,11 @@ class Agent:
     ) -> None:
         self.provider = provider
         self.ctx = tools.ToolContext(workdir, memory_dir)
+        self.trace: list[dict] = []  # tool calls of the most recent run_turn
 
     def run_turn(self, user_input: str) -> str:
         """Run one user turn to completion; return the final answer text."""
+        self.trace = []
         self.provider.add_user_message(user_input)
 
         for _ in range(MAX_ITERATIONS):
@@ -68,6 +70,14 @@ class Agent:
         for call in tool_calls:
             print(f"  [tool] {call.name}({_fmt_input(call.args)})")
             result, is_error = tools.dispatch(call.name, call.args, self.ctx)
+            self.trace.append(
+                {
+                    "tool": call.name,
+                    "input": call.args,
+                    "result": result,
+                    "is_error": is_error,
+                }
+            )
             results.append(providers.ToolResult(call.id, call.name, result, is_error))
         return results
 

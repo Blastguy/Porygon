@@ -10,7 +10,10 @@ __pycache__/
 workspace/
 
 # Agent long-term memory (user-specific)
-memory/
+memory/*
+
+# Eval run outputs
+evals/results/
 .claude/
 
 # ruff
