@@ -1,0 +1,15 @@
+[project]
+name = "porygon"
+version = "0.1.0"
+description = "A simple from-scratch ReAct agent with calculator, Wikipedia, and file I/O tools."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "anthropic>=0.40",
+    "requests>=2.31",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]

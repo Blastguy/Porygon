@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# uv / virtualenv
+.venv/
+
+# Agent runtime sandbox
+workspace/
+
+# ruff
+.ruff_cache/
