@@ -1,20 +1,18 @@
-"""The porygon ReAct agent: a hand-written agentic loop over the Anthropic API.
+"""The porygon ReAct agent: a hand-written agentic loop over a model provider.
 
-The loop *is* the ReAct engine. Each turn, the model reasons (adaptive thinking),
-acts (emits ``tool_use`` blocks), and we feed back observations (``tool_result``
-blocks) until it produces a final answer (``stop_reason == "end_turn"``).
+The loop *is* the ReAct engine. Each turn, the model reasons, acts (requests
+tool calls), and we feed back observations until it produces a final answer.
+Provider specifics (Anthropic vs Gemini message formats, tool-calling schemas)
+live behind the ``providers.Provider`` interface.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import anthropic
-
+import providers
 import tools
 
-MODEL = "claude-sonnet-4-6"
-MAX_TOKENS = 16000
 MAX_ITERATIONS = 10  # tool rounds per user turn, so a stuck model can't loop forever
 
 SYSTEM_PROMPT = (
@@ -35,65 +33,43 @@ SYSTEM_PROMPT = (
 
 
 class Agent:
-    """Holds the API client and conversation state, and runs the agentic loop."""
+    """Holds the provider and tool context, and runs the agentic loop."""
 
     def __init__(
-        self, client: anthropic.Anthropic, workdir: Path, memory_dir: Path
+        self, provider: providers.Provider, workdir: Path, memory_dir: Path
     ) -> None:
-        self.client = client
+        self.provider = provider
         self.ctx = tools.ToolContext(workdir, memory_dir)
-        self.messages: list[dict] = []
 
     def run_turn(self, user_input: str) -> str:
         """Run one user turn to completion; return the final answer text."""
-        self.messages.append({"role": "user", "content": user_input})
+        self.provider.add_user_message(user_input)
 
         for _ in range(MAX_ITERATIONS):
-            response = self.client.messages.create(
-                model=MODEL,
-                max_tokens=MAX_TOKENS,
-                thinking={"type": "adaptive"},
-                system=SYSTEM_PROMPT,
-                tools=tools.TOOL_SCHEMAS,
-                messages=self.messages,
-            )
-            self.messages.append({"role": "assistant", "content": response.content})
+            result = self.provider.step()
 
-            if response.stop_reason == "tool_use":
-                self._run_tools(response.content)
+            if result.status == "tool_use":
+                self.provider.add_tool_results(self._run_tools(result.tool_calls))
                 continue
 
-            if response.stop_reason == "pause_turn":
+            if result.status == "continue":
                 # Server-side continuation; re-send to resume.
                 continue
 
-            return _text_of(response.content)
+            return result.text or "(no answer)"
 
         return "(stopped: reached the tool-call limit for this turn.)"
 
-    def _run_tools(self, content: list) -> None:
-        """Execute every tool_use block and append the results as one user turn."""
+    def _run_tools(
+        self, tool_calls: list[providers.ToolCall]
+    ) -> list[providers.ToolResult]:
+        """Execute every requested tool call and collect the results."""
         results = []
-        for block in content:
-            if block.type != "tool_use":
-                continue
-            print(f"  [tool] {block.name}({_fmt_input(block.input)})")
-            result, is_error = tools.dispatch(block.name, block.input, self.ctx)
-            results.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": result,
-                    "is_error": is_error,
-                }
-            )
-        self.messages.append({"role": "user", "content": results})
-
-
-def _text_of(content: list) -> str:
-    """Join the text blocks of a response into a single string."""
-    parts = [block.text for block in content if block.type == "text"]
-    return "\n".join(parts).strip() or "(no answer)"
+        for call in tool_calls:
+            print(f"  [tool] {call.name}({_fmt_input(call.args)})")
+            result, is_error = tools.dispatch(call.name, call.args, self.ctx)
+            results.append(providers.ToolResult(call.id, call.name, result, is_error))
+        return results
 
 
 def _fmt_input(tool_input: dict) -> str:

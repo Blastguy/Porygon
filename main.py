@@ -1,18 +1,28 @@
 """porygon: a simple from-scratch ReAct agent.
 
 Usage:
-    uv run python main.py --api-key sk-ant-... [--workdir ./workspace]
+    uv run python main.py [--provider anthropic|gemini] [--api-key ...]
+                          [--model ...] [--workdir ./workspace] [--memory-dir ./memory]
+
+The API key may also come from ANTHROPIC_API_KEY or GEMINI_API_KEY,
+depending on the selected provider.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
 import anthropic
+from google.genai import errors as genai_errors
 
-from agent import Agent
+import providers
+import tools
+from agent import SYSTEM_PROMPT, Agent
+
+API_KEY_ENV_VARS = {"anthropic": "ANTHROPIC_API_KEY", "gemini": "GEMINI_API_KEY"}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -21,9 +31,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="A simple ReAct agent with calculator, Wikipedia, and file I/O tools.",
     )
     parser.add_argument(
+        "--provider",
+        choices=["anthropic", "gemini"],
+        default="anthropic",
+        help="Model provider to use (default: anthropic).",
+    )
+    parser.add_argument(
         "--api-key",
-        required=True,
-        help="Anthropic API key.",
+        help=(
+            "API key for the selected provider. Falls back to the "
+            "ANTHROPIC_API_KEY or GEMINI_API_KEY environment variable."
+        ),
+    )
+    parser.add_argument(
+        "--model",
+        help="Model name override (default: the provider's default model).",
     )
     parser.add_argument(
         "--workdir",
@@ -61,12 +83,12 @@ def repl(agent: Agent) -> None:
         try:
             answer = agent.run_turn(user_input)
         except anthropic.AuthenticationError:
-            print("Error: authentication failed — check your --api-key.")
+            print("Error: authentication failed — check your API key.")
             break
         except anthropic.RateLimitError:
             print("Error: rate limited. Wait a moment and try again.")
             continue
-        except anthropic.APIError as exc:
+        except (anthropic.APIError, genai_errors.APIError) as exc:
             print(f"Error: API request failed: {exc}")
             continue
 
@@ -76,13 +98,23 @@ def repl(agent: Agent) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
+    api_key = args.api_key or os.environ.get(API_KEY_ENV_VARS[args.provider])
+    if not api_key:
+        print(
+            f"Error: no API key. Pass --api-key or set "
+            f"{API_KEY_ENV_VARS[args.provider]}."
+        )
+        return 1
+
     workdir = args.workdir
     workdir.mkdir(parents=True, exist_ok=True)
     memory_dir = args.memory_dir
     memory_dir.mkdir(parents=True, exist_ok=True)
 
-    client = anthropic.Anthropic(api_key=args.api_key)
-    agent = Agent(client, workdir, memory_dir)
+    provider = providers.build_provider(
+        args.provider, api_key, args.model, SYSTEM_PROMPT, tools.TOOL_SCHEMAS
+    )
+    agent = Agent(provider, workdir, memory_dir)
 
     repl(agent)
     return 0
