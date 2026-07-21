@@ -11,6 +11,7 @@ workspace/
 
 # Agent long-term memory (user-specific)
 memory/*
+!memory/example.md
 
 # Eval run outputs
 evals/results/
